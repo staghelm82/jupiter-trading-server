@@ -796,18 +796,25 @@ async def tradingview_webhook(
 
         return response
 
-    except Exception as exc:
+   except Exception as exc:
 
-        log_trade(
-            alert_id=alert_id,
-            action=action,
-            symbol=symbol,
-            amount=0,
-            status="ERROR",
-            error=str(exc)
-        )
+    print("========================================")
+    print("WEBHOOK ERROR")
+    print("========================================")
+    print(f"ERROR TYPE: {type(exc).__name__}")
+    print(f"ERROR MESSAGE: {exc}")
+    print("========================================")
 
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc)
-        )
+    log_trade(
+        alert_id=alert_id,
+        action=action,
+        symbol=symbol,
+        amount=0,
+        status="ERROR",
+        error=str(exc)
+    )
+
+    raise HTTPException(
+        status_code=500,
+        detail=str(exc)
+    )
