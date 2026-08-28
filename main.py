@@ -3,12 +3,14 @@ import base64
 import hashlib
 import hmac
 import sqlite3
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
+
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 from solders.message import to_bytes_versioned
@@ -38,6 +40,11 @@ WEBHOOK_SECRET = os.getenv(
 BS58_PRIVATE_KEY = os.getenv(
     "BS58_PRIVATE_KEY",
     ""
+).strip()
+
+SOLANA_RPC_URL = os.getenv(
+    "SOLANA_RPC_URL",
+    "https://api.mainnet-beta.solana.com"
 ).strip()
 
 DRY_RUN = os.getenv(
@@ -86,7 +93,14 @@ SOL_MAX_SELL = float(
 JUP_BUY_AMOUNT_USDT = float(
     os.getenv(
         "JUP_BUY_AMOUNT_USDT",
-        "20"
+        "0.25"
+    )
+)
+
+JUP_MIN_BUY_USDT = float(
+    os.getenv(
+        "JUP_MIN_BUY_USDT",
+        "0.25"
     )
 )
 
@@ -113,6 +127,32 @@ JUP_MAX_SELL = float(
 
 
 # ============================================================
+# TRADING SETTINGS
+# ============================================================
+
+SLIPPAGE_BPS = int(
+    os.getenv(
+        "SLIPPAGE_BPS",
+        "100"
+    )
+)
+
+RPC_TIMEOUT_SECONDS = float(
+    os.getenv(
+        "RPC_TIMEOUT_SECONDS",
+        "30"
+    )
+)
+
+RPC_CONFIRM_TIMEOUT_SECONDS = int(
+    os.getenv(
+        "RPC_CONFIRM_TIMEOUT_SECONDS",
+        "45"
+    )
+)
+
+
+# ============================================================
 # SUPPORTED SYMBOLS
 # ============================================================
 
@@ -123,32 +163,41 @@ ALLOWED_SYMBOLS = {
 
 
 # ============================================================
-# SOLANA TOKEN MINTS
+# SOLANA MINTS
 # ============================================================
 
 SOL_MINT = (
     "So11111111111111111111111111111111111111112"
 )
 
+USDC_MINT = (
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+)
+
 JUP_MINT = (
     "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
 )
 
-USDC_MINT = (
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGkZwyTDt1v"
-)
-
-USDT_MINT = (
-    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
-)
-
 
 # ============================================================
-# JUPITER
+# JUPITER API
+#
+# This version uses the standard self-managed Swap API:
+#
+# 1. GET /quote
+# 2. POST /swap
+# 3. Sign transaction locally
+# 4. Send transaction through Solana RPC
+#
+# It does NOT use Jupiter /order or /execute.
 # ============================================================
 
 JUPITER_BASE_URL = (
-    "https://api.jup.ag/swap/v2"
+    "https://api.jup.ag/swap/v1"
+)
+
+JUPITER_TOKEN_API_URL = (
+    "https://api.jup.ag/tokens/v2"
 )
 
 
@@ -158,7 +207,7 @@ JUPITER_BASE_URL = (
 
 app = FastAPI(
     title="TradingView → Jupiter Trading Server",
-    version="3.0.0"
+    version="4.0.0"
 )
 
 
@@ -168,6 +217,20 @@ app = FastAPI(
 
 wallet: Optional[Keypair] = None
 
+
+# ============================================================
+# DYNAMIC TOKEN DATA
+# ============================================================
+
+USDT_MINT: Optional[str] = None
+USDT_DECIMALS: int = 6
+
+JUP_DECIMALS: int = 6
+
+
+# ============================================================
+# LOAD WALLET
+# ============================================================
 
 def load_wallet():
 
@@ -194,7 +257,10 @@ def load_wallet():
                 f"got {len(decoded_key)}."
             )
 
+        # Jupiter wallet export is 64 bytes.
+        #
         # The first 32 bytes are the seed.
+        #
         seed = decoded_key[:32]
 
         wallet = Keypair.from_seed(
@@ -223,6 +289,197 @@ def load_wallet():
         raise RuntimeError(
             "Unable to load the Solana wallet private key."
         ) from exc
+
+
+# ============================================================
+# LOOK UP USDT THROUGH JUPITER
+# ============================================================
+
+async def load_token_information():
+
+    global USDT_MINT
+    global USDT_DECIMALS
+    global JUP_DECIMALS
+
+    if not JUPITER_API_KEY:
+
+        raise RuntimeError(
+            "JUPITER_API_KEY is required to "
+            "load token information."
+        )
+
+    headers = {
+        "x-api-key":
+            JUPITER_API_KEY
+    }
+
+    async with httpx.AsyncClient(
+        timeout=30.0
+    ) as client:
+
+        # ----------------------------------------------------
+        # Search USDT
+        # ----------------------------------------------------
+
+        response = await client.get(
+            f"{JUPITER_TOKEN_API_URL}/search",
+            params={
+                "query": "USDT"
+            },
+            headers=headers
+        )
+
+        if response.status_code != 200:
+
+            raise RuntimeError(
+                "Unable to look up USDT through "
+                f"Jupiter Tokens API "
+                f"({response.status_code}): "
+                f"{response.text}"
+            )
+
+        tokens = response.json()
+
+        if not isinstance(
+            tokens,
+            list
+        ):
+
+            raise RuntimeError(
+                "Unexpected Jupiter Tokens API "
+                "response for USDT."
+            )
+
+        # Prefer exact USDT symbol.
+        usdt_token = None
+
+        for token in tokens:
+
+            symbol = str(
+                token.get(
+                    "symbol",
+                    ""
+                )
+            ).upper()
+
+            name = str(
+                token.get(
+                    "name",
+                    ""
+                )
+            ).upper()
+
+            if symbol == "USDT":
+
+                usdt_token = token
+
+                break
+
+            if name == "TETHER USD":
+
+                usdt_token = token
+
+        if usdt_token is None:
+
+            raise RuntimeError(
+                "Could not find the official "
+                "USDT token through Jupiter."
+            )
+
+        USDT_MINT = str(
+            usdt_token.get(
+                "id",
+                ""
+            )
+        )
+
+        USDT_DECIMALS = int(
+            usdt_token.get(
+                "decimals",
+                6
+            )
+        )
+
+        if not USDT_MINT:
+
+            raise RuntimeError(
+                "Jupiter returned USDT without "
+                "a mint address."
+            )
+
+        # ----------------------------------------------------
+        # JUP decimals
+        # ----------------------------------------------------
+
+        response = await client.get(
+            f"{JUPITER_TOKEN_API_URL}/search",
+            params={
+                "query": "JUP"
+            },
+            headers=headers
+        )
+
+        if response.status_code == 200:
+
+            tokens = response.json()
+
+            if isinstance(
+                tokens,
+                list
+            ):
+
+                for token in tokens:
+
+                    if (
+                        str(
+                            token.get(
+                                "id",
+                                ""
+                            )
+                        )
+                        == JUP_MINT
+                    ):
+
+                        JUP_DECIMALS = int(
+                            token.get(
+                                "decimals",
+                                6
+                            )
+                        )
+
+                        break
+
+    print(
+        "========================================"
+    )
+
+    print(
+        "TOKEN INFORMATION LOADED"
+    )
+
+    print(
+        "JUP MINT:",
+        JUP_MINT
+    )
+
+    print(
+        "JUP DECIMALS:",
+        JUP_DECIMALS
+    )
+
+    print(
+        "USDT MINT:",
+        USDT_MINT
+    )
+
+    print(
+        "USDT DECIMALS:",
+        USDT_DECIMALS
+    )
+
+    print(
+        "========================================"
+    )
 
 
 # ============================================================
@@ -289,7 +546,9 @@ def alert_already_processed(
         FROM processed_alerts
         WHERE alert_id = ?
         """,
-        (alert_id,)
+        (
+            alert_id,
+        )
     )
 
     result = cursor.fetchone()
@@ -405,47 +664,77 @@ async def startup_event():
 
     load_wallet()
 
+    await load_token_information()
+
+    print(
+        "========================================"
+    )
+
+    print(
+        "TRADING CONFIGURATION"
+    )
+
+    print(
+        "========================================"
+    )
+
     print(
         "DRY_RUN:",
         DRY_RUN
     )
 
     print(
-        "SOL_BUY_AMOUNT_USDC:",
-        SOL_BUY_AMOUNT_USDC
+        "SOL BUY DEFAULT:",
+        SOL_BUY_AMOUNT_USDC,
+        "USDC"
     )
 
     print(
-        "SOL_SELL_AMOUNT:",
-        SOL_SELL_AMOUNT
+        "SOL SELL DEFAULT:",
+        SOL_SELL_AMOUNT,
+        "SOL"
     )
 
     print(
-        "JUP_BUY_AMOUNT_USDT:",
-        JUP_BUY_AMOUNT_USDT
+        "JUP BUY DEFAULT:",
+        JUP_BUY_AMOUNT_USDT,
+        "USDT"
     )
 
     print(
-        "JUP_SELL_AMOUNT:",
-        JUP_SELL_AMOUNT
+        "JUP MINIMUM BUY:",
+        JUP_MIN_BUY_USDT,
+        "USDT"
     )
 
     print(
-        "JUPITER_API_KEY_LOADED:",
-        bool(JUPITER_API_KEY)
+        "JUP SELL DEFAULT:",
+        JUP_SELL_AMOUNT,
+        "JUP"
     )
 
     print(
-        "WEBHOOK_SECRET_LOADED:",
-        bool(WEBHOOK_SECRET)
+        "SLIPPAGE:",
+        SLIPPAGE_BPS,
+        "bps"
     )
 
     print(
-        "SUPPORTED_SYMBOLS:",
-        ", ".join(
-            sorted(
-                ALLOWED_SYMBOLS
-            )
+        "SOLANA RPC:",
+        SOLANA_RPC_URL
+    )
+
+    print(
+        "JUPITER API KEY LOADED:",
+        bool(
+            JUPITER_API_KEY
+        )
+    )
+
+    print(
+        "WEBHOOK SECRET LOADED:",
+        bool(
+            WEBHOOK_SECRET
         )
     )
 
@@ -455,18 +744,35 @@ async def startup_event():
 
 
 # ============================================================
-# HEALTH CHECK
+# HEALTH
 # ============================================================
 
 @app.get("/")
 async def root():
 
     return {
-        "status": "online",
-        "service": "TradingView → Jupiter",
-        "dry_run": DRY_RUN,
+        "status":
+            "online",
+
+        "service":
+            "TradingView → Jupiter",
+
+        "version":
+            "4.0.0",
+
+        "dry_run":
+            DRY_RUN,
+
         "supported_symbols":
-            sorted(ALLOWED_SYMBOLS),
+            sorted(
+                ALLOWED_SYMBOLS
+            ),
+
+        "jup_min_buy_usdt":
+            JUP_MIN_BUY_USDT,
+
+        "gasless":
+            False,
     }
 
 
@@ -474,24 +780,43 @@ async def root():
 async def health():
 
     return {
-        "status": "healthy",
-        "dry_run": DRY_RUN,
+        "status":
+            "healthy",
+
+        "dry_run":
+            DRY_RUN,
+
         "wallet_loaded":
             wallet is not None,
+
         "jupiter_api_key_loaded":
-            bool(JUPITER_API_KEY),
+            bool(
+                JUPITER_API_KEY
+            ),
+
         "webhook_secret_loaded":
-            bool(WEBHOOK_SECRET),
+            bool(
+                WEBHOOK_SECRET
+            ),
+
         "supported_symbols":
-            sorted(ALLOWED_SYMBOLS),
-        "sol_buy_amount_usdc":
-            SOL_BUY_AMOUNT_USDC,
-        "sol_sell_amount":
-            SOL_SELL_AMOUNT,
-        "jup_buy_amount_usdt":
-            JUP_BUY_AMOUNT_USDT,
-        "jup_sell_amount":
-            JUP_SELL_AMOUNT,
+            sorted(
+                ALLOWED_SYMBOLS
+            ),
+
+        "jup_min_buy_usdt":
+            JUP_MIN_BUY_USDT,
+
+        "usdt_mint_loaded":
+            USDT_MINT is not None,
+
+        "rpc_configured":
+            bool(
+                SOLANA_RPC_URL
+            ),
+
+        "gasless":
+            False,
     }
 
 
@@ -546,6 +871,12 @@ def validate_live_configuration():
             "Solana wallet is not loaded."
         )
 
+    if not SOLANA_RPC_URL:
+
+        raise RuntimeError(
+            "SOLANA_RPC_URL is missing."
+        )
+
 
 # ============================================================
 # TOKEN CONFIGURATION
@@ -581,6 +912,9 @@ def get_token_configuration(
             "sell_amount":
                 SOL_SELL_AMOUNT,
 
+            "min_buy":
+                0.0,
+
             "max_buy":
                 SOL_MAX_BUY_USDC,
 
@@ -595,6 +929,12 @@ def get_token_configuration(
         }
 
     if symbol == "JUP/USDT":
+
+        if USDT_MINT is None:
+
+            raise RuntimeError(
+                "USDT mint has not been loaded."
+            )
 
         return {
             "symbol":
@@ -618,6 +958,9 @@ def get_token_configuration(
             "sell_amount":
                 JUP_SELL_AMOUNT,
 
+            "min_buy":
+                JUP_MIN_BUY_USDT,
+
             "max_buy":
                 JUP_MAX_BUY_USDT,
 
@@ -625,10 +968,10 @@ def get_token_configuration(
                 JUP_MAX_SELL,
 
             "token_decimals":
-                6,
+                JUP_DECIMALS,
 
             "quote_decimals":
-                6,
+                USDT_DECIMALS,
         }
 
     raise ValueError(
@@ -640,28 +983,15 @@ def get_token_configuration(
 # CONVERT AMOUNTS
 # ============================================================
 
-def quote_to_base_units(
+def amount_to_base_units(
     amount: float,
     decimals: int
 ) -> int:
 
     return int(
         round(
-            amount * (
-                10 ** decimals
-            )
-        )
-    )
-
-
-def token_to_base_units(
-    amount: float,
-    decimals: int
-) -> int:
-
-    return int(
-        round(
-            amount * (
+            amount *
+            (
                 10 ** decimals
             )
         )
@@ -669,10 +999,289 @@ def token_to_base_units(
 
 
 # ============================================================
-# SIGN JUPITER VERSIONED TRANSACTION
+# JUPITER QUOTE
 # ============================================================
 
-def sign_jupiter_transaction(
+async def get_jupiter_quote(
+    input_mint: str,
+    output_mint: str,
+    amount_base_units: int
+):
+
+    headers = {
+        "x-api-key":
+            JUPITER_API_KEY
+    }
+
+    params = {
+        "inputMint":
+            input_mint,
+
+        "outputMint":
+            output_mint,
+
+        "amount":
+            str(
+                amount_base_units
+            ),
+
+        "slippageBps":
+            str(
+                SLIPPAGE_BPS
+            ),
+
+        "restrictIntermediateTokens":
+            "true",
+
+        "instructionVersion":
+            "V2",
+    }
+
+    print(
+        "========================================"
+    )
+
+    print(
+        "JUPITER QUOTE REQUEST"
+    )
+
+    print(
+        "INPUT MINT:",
+        input_mint
+    )
+
+    print(
+        "OUTPUT MINT:",
+        output_mint
+    )
+
+    print(
+        "AMOUNT BASE UNITS:",
+        amount_base_units
+    )
+
+    print(
+        "SLIPPAGE BPS:",
+        SLIPPAGE_BPS
+    )
+
+    print(
+        "========================================"
+    )
+
+    async with httpx.AsyncClient(
+        timeout=30.0
+    ) as client:
+
+        response = await client.get(
+            f"{JUPITER_BASE_URL}/quote",
+            params=params,
+            headers=headers
+        )
+
+    print(
+        "JUPITER QUOTE STATUS:",
+        response.status_code
+    )
+
+    if response.status_code != 200:
+
+        raise RuntimeError(
+            "Jupiter quote failed "
+            f"({response.status_code}): "
+            f"{response.text}"
+        )
+
+    quote = response.json()
+
+    if quote.get("error"):
+
+        raise RuntimeError(
+            "Jupiter quote error: "
+            f"{quote.get('error')}"
+        )
+
+    if not quote.get(
+        "outAmount"
+    ):
+
+        raise RuntimeError(
+            "Jupiter returned no "
+            "outAmount."
+        )
+
+    print(
+        "JUPITER QUOTE SUCCESS"
+    )
+
+    print(
+        "INPUT:",
+        quote.get(
+            "inAmount"
+        )
+    )
+
+    print(
+        "OUTPUT:",
+        quote.get(
+            "outAmount"
+        )
+    )
+
+    print(
+        "PRICE IMPACT:",
+        quote.get(
+            "priceImpactPct"
+        )
+    )
+
+    print(
+        "========================================"
+    )
+
+    return quote
+
+
+# ============================================================
+# BUILD NORMAL SWAP TRANSACTION
+#
+# This is NOT gasless.
+#
+# Jupiter returns an unsigned transaction.
+# Your wallet signs it.
+# Your RPC broadcasts it.
+# ============================================================
+
+async def build_swap_transaction(
+    quote_response: dict
+):
+
+    if wallet is None:
+
+        raise RuntimeError(
+            "Wallet is not loaded."
+        )
+
+    headers = {
+        "Content-Type":
+            "application/json",
+
+        "x-api-key":
+            JUPITER_API_KEY
+    }
+
+    payload = {
+        "quoteResponse":
+            quote_response,
+
+        "userPublicKey":
+            str(
+                wallet.pubkey()
+            ),
+
+        "wrapAndUnwrapSol":
+            True,
+
+        "dynamicComputeUnitLimit":
+            True,
+
+        "prioritizationFeeLamports": {
+            "priorityLevelWithMaxLamports": {
+                "priorityLevel":
+                    "veryHigh",
+
+                "maxLamports":
+                    1_000_000
+            }
+        }
+    }
+
+    print(
+        "========================================"
+    )
+
+    print(
+        "BUILDING NORMAL JUPITER SWAP"
+    )
+
+    print(
+        "GASLESS: FALSE"
+    )
+
+    print(
+        "USER WALLET:",
+        wallet.pubkey()
+    )
+
+    print(
+        "========================================"
+    )
+
+    async with httpx.AsyncClient(
+        timeout=60.0
+    ) as client:
+
+        response = await client.post(
+            f"{JUPITER_BASE_URL}/swap",
+            headers=headers,
+            json=payload
+        )
+
+    print(
+        "JUPITER SWAP BUILD STATUS:",
+        response.status_code
+    )
+
+    if response.status_code != 200:
+
+        raise RuntimeError(
+            "Jupiter swap transaction "
+            "build failed "
+            f"({response.status_code}): "
+            f"{response.text}"
+        )
+
+    result = response.json()
+
+    if not result.get(
+        "swapTransaction"
+    ):
+
+        raise RuntimeError(
+            "Jupiter returned no "
+            "swapTransaction."
+        )
+
+    print(
+        "SWAP TRANSACTION BUILT"
+    )
+
+    print(
+        "LAST VALID BLOCK HEIGHT:",
+        result.get(
+            "lastValidBlockHeight"
+        )
+    )
+
+    print(
+        "PRIORITIZATION FEE:",
+        result.get(
+            "prioritizationFeeLamports"
+        )
+    )
+
+    print(
+        "========================================"
+    )
+
+    return result
+
+
+# ============================================================
+# SIGN TRANSACTION
+# ============================================================
+
+def sign_swap_transaction(
     transaction_base64: str
 ) -> str:
 
@@ -700,8 +1309,10 @@ def sign_jupiter_transaction(
         )
     )
 
-    signature = wallet.sign_message(
-        message_bytes
+    signature = (
+        wallet.sign_message(
+            message_bytes
+        )
     )
 
     signatures = list(
@@ -718,7 +1329,9 @@ def sign_jupiter_transaction(
         account_keys
     ):
 
-        if str(account_key) == str(
+        if str(
+            account_key
+        ) == str(
             wallet.pubkey()
         ):
 
@@ -730,7 +1343,7 @@ def sign_jupiter_transaction(
 
         raise RuntimeError(
             "Wallet public key was not "
-            "found in the Jupiter transaction."
+            "found in Jupiter transaction."
         )
 
     signatures[
@@ -744,221 +1357,283 @@ def sign_jupiter_transaction(
         )
     )
 
-    encoded = (
+    return (
         base64.b64encode(
             bytes(
                 signed_transaction
             )
         )
-        .decode("utf-8")
+        .decode(
+            "utf-8"
+        )
     )
 
-    return encoded
-
 
 # ============================================================
-# JUPITER ORDER
+# SEND SIGNED TRANSACTION THROUGH SOLANA RPC
 # ============================================================
 
-async def get_jupiter_order(
-    input_mint: str,
-    output_mint: str,
-    amount_base_units: int
+async def send_transaction(
+    signed_transaction_base64: str
 ):
-
-    if wallet is None:
-
-        raise RuntimeError(
-            "Wallet is not loaded."
-        )
-
-    if not JUPITER_API_KEY:
-
-        raise RuntimeError(
-            "JUPITER_API_KEY is missing."
-        )
-
-    params = {
-        "inputMint":
-            input_mint,
-
-        "outputMint":
-            output_mint,
-
-        "amount":
-            str(
-                amount_base_units
-            ),
-
-        "taker":
-            str(
-                wallet.pubkey()
-            ),
-    }
-
-    headers = {
-        "x-api-key":
-            JUPITER_API_KEY
-    }
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "REQUESTING JUPITER ORDER"
-    )
-
-    print(
-        "INPUT MINT:",
-        input_mint
-    )
-
-    print(
-        "OUTPUT MINT:",
-        output_mint
-    )
-
-    print(
-        "AMOUNT BASE UNITS:",
-        amount_base_units
-    )
-
-    print(
-        "TAKER:",
-        wallet.pubkey()
-    )
-
-    print(
-        "========================================"
-    )
-
-    async with httpx.AsyncClient(
-        timeout=30.0
-    ) as client:
-
-        response = await client.get(
-            f"{JUPITER_BASE_URL}/order",
-            params=params,
-            headers=headers
-        )
-
-    print(
-        "JUPITER ORDER HTTP STATUS:",
-        response.status_code
-    )
-
-    if response.status_code != 200:
-
-        print(
-            "JUPITER ORDER RESPONSE:",
-            response.text
-        )
-
-        raise RuntimeError(
-            "Jupiter /order failed "
-            f"({response.status_code}): "
-            f"{response.text}"
-        )
-
-    order = response.json()
-
-    print(
-        "JUPITER ORDER RECEIVED"
-    )
-
-    print(
-        "REQUEST ID:",
-        order.get(
-            "requestId"
-        )
-    )
-
-    print(
-        "EXPECTED OUTPUT:",
-        order.get(
-            "outAmount"
-        )
-    )
-
-    print(
-        "ROUTER:",
-        order.get(
-            "router"
-        )
-    )
-
-    if order.get("error"):
-
-        raise RuntimeError(
-            "Jupiter order error: "
-            f"{order.get('error')}"
-        )
-
-    if not order.get(
-        "transaction"
-    ):
-
-        raise RuntimeError(
-            "Jupiter returned no transaction."
-        )
-
-    return order
-
-
-# ============================================================
-# JUPITER EXECUTE
-# ============================================================
-
-async def execute_jupiter_order(
-    signed_transaction: str,
-    request_id: str
-):
-
-    headers = {
-        "Content-Type":
-            "application/json",
-
-        "x-api-key":
-            JUPITER_API_KEY
-    }
 
     payload = {
-        "signedTransaction":
-            signed_transaction,
+        "jsonrpc":
+            "2.0",
 
-        "requestId":
-            request_id,
+        "id":
+            1,
+
+        "method":
+            "sendTransaction",
+
+        "params": [
+            signed_transaction_base64,
+            {
+                "encoding":
+                    "base64",
+
+                "skipPreflight":
+                    False,
+
+                "preflightCommitment":
+                    "confirmed",
+
+                "maxRetries":
+                    3
+            }
+        ]
     }
 
+    print(
+        "========================================"
+    )
+
+    print(
+        "BROADCASTING TRANSACTION"
+    )
+
+    print(
+        "RPC:",
+        SOLANA_RPC_URL
+    )
+
+    print(
+        "GASLESS: FALSE"
+    )
+
+    print(
+        "WALLET PAYS SOL NETWORK FEE"
+    )
+
+    print(
+        "========================================"
+    )
+
     async with httpx.AsyncClient(
-        timeout=60.0
+        timeout=RPC_TIMEOUT_SECONDS
     ) as client:
 
         response = await client.post(
-            f"{JUPITER_BASE_URL}/execute",
-            headers=headers,
+            SOLANA_RPC_URL,
             json=payload
         )
 
     if response.status_code != 200:
 
         raise RuntimeError(
-            "Jupiter /execute failed "
+            "Solana RPC HTTP error "
             f"({response.status_code}): "
             f"{response.text}"
         )
 
-    return response.json()
+    rpc_result = response.json()
+
+    if rpc_result.get(
+        "error"
+    ):
+
+        raise RuntimeError(
+            "Solana RPC sendTransaction "
+            "error: "
+            f"{rpc_result['error']}"
+        )
+
+    signature = rpc_result.get(
+        "result"
+    )
+
+    if not signature:
+
+        raise RuntimeError(
+            "Solana RPC returned no "
+            "transaction signature."
+        )
+
+    print(
+        "TRANSACTION BROADCAST"
+    )
+
+    print(
+        "SIGNATURE:",
+        signature
+    )
+
+    print(
+        "========================================"
+    )
+
+    return signature
 
 
 # ============================================================
-# BUY
+# CONFIRM TRANSACTION
 # ============================================================
 
-async def execute_buy(
+async def confirm_transaction(
+    signature: str
+):
+
+    payload = {
+        "jsonrpc":
+            "2.0",
+
+        "id":
+            1,
+
+        "method":
+            "getSignatureStatuses",
+
+        "params": [
+            [signature],
+            {
+                "searchTransactionHistory":
+                    True
+            }
+        ]
+    }
+
+    deadline = (
+        asyncio.get_running_loop().time()
+        +
+        RPC_CONFIRM_TIMEOUT_SECONDS
+    )
+
+    while (
+        asyncio.get_running_loop().time()
+        < deadline
+    ):
+
+        try:
+
+            async with httpx.AsyncClient(
+                timeout=15.0
+            ) as client:
+
+                response = await client.post(
+                    SOLANA_RPC_URL,
+                    json=payload
+                )
+
+            if response.status_code == 200:
+
+                rpc_result = (
+                    response.json()
+                )
+
+                values = (
+                    rpc_result
+                    .get(
+                        "result",
+                        {}
+                    )
+                    .get(
+                        "value",
+                        []
+                    )
+                )
+
+                status = (
+                    values[0]
+                    if values
+                    else None
+                )
+
+                if status is not None:
+
+                    confirmation_status = (
+                        status.get(
+                            "confirmationStatus"
+                        )
+                    )
+
+                    error = status.get(
+                        "err"
+                    )
+
+                    if error:
+
+                        return {
+                            "confirmed":
+                                False,
+
+                            "status":
+                                "FAILED",
+
+                            "error":
+                                error,
+
+                            "confirmation":
+                                confirmation_status
+                        }
+
+                    if confirmation_status in (
+                        "confirmed",
+                        "finalized"
+                    ):
+
+                        return {
+                            "confirmed":
+                                True,
+
+                            "status":
+                                "CONFIRMED",
+
+                            "confirmation":
+                                confirmation_status
+                        }
+
+        except Exception as exc:
+
+            print(
+                "CONFIRMATION CHECK ERROR:",
+                exc
+            )
+
+        await asyncio.sleep(
+            1
+        )
+
+    return {
+        "confirmed":
+            False,
+
+        "status":
+            "TIMEOUT",
+
+        "error":
+            "Transaction confirmation timed out."
+    }
+
+
+# ============================================================
+# COMPLETE SWAP EXECUTION
+# ============================================================
+
+async def execute_swap(
     symbol: str,
-    amount_quote: float
+    action: str,
+    amount: float
 ):
 
     config = (
@@ -967,201 +1642,185 @@ async def execute_buy(
         )
     )
 
-    if amount_quote <= 0:
+    # ========================================================
+    # BUY
+    # ========================================================
 
-        raise ValueError(
-            "BUY amount must be "
-            "greater than zero."
+    if action == "BUY":
+
+        if amount <= 0:
+
+            raise ValueError(
+                "BUY amount must be "
+                "greater than zero."
+            )
+
+        if amount < config[
+            "min_buy"
+        ]:
+
+            raise ValueError(
+                f"{symbol} BUY amount "
+                f"{amount:.8f} "
+                f"{config['quote_name']} "
+                f"is below the minimum "
+                f"BUY of "
+                f"{config['min_buy']:.8f} "
+                f"{config['quote_name']}."
+            )
+
+        if amount > config[
+            "max_buy"
+        ]:
+
+            raise ValueError(
+                f"{symbol} BUY amount "
+                f"{amount:.8f} "
+                f"{config['quote_name']} "
+                f"exceeds maximum "
+                f"{config['max_buy']:.8f}."
+            )
+
+        input_mint = (
+            config[
+                "quote_mint"
+            ]
         )
 
-    if amount_quote > config[
-        "max_buy"
-    ]:
-
-        raise ValueError(
-            f"{symbol} BUY amount "
-            f"{amount_quote:.2f} "
-            f"{config['quote_name']} "
-            f"exceeds maximum "
-            f"{config['max_buy']:.2f}."
+        output_mint = (
+            config[
+                "token_mint"
+            ]
         )
 
-    print(
-        "========================================"
-    )
-
-    print(
-        f"EXECUTE {symbol} BUY"
-    )
-
-    print(
-        f"BUY AMOUNT: "
-        f"{amount_quote:.8f} "
-        f"{config['quote_name']}"
-    )
-
-    print(
-        f"BUY TOKEN: "
-        f"{config['token_name']}"
-    )
-
-    print(
-        "========================================"
-    )
-
-    amount_base_units = (
-        quote_to_base_units(
-            amount_quote,
+        input_decimals = (
             config[
                 "quote_decimals"
             ]
         )
-    )
 
-    order = (
-        await get_jupiter_order(
-            input_mint=config[
-                "quote_mint"
-            ],
+        amount_label = (
+            f"{amount:.8f} "
+            f"{config['quote_name']}"
+        )
 
-            output_mint=config[
+    # ========================================================
+    # SELL
+    # ========================================================
+
+    elif action == "SELL":
+
+        if amount <= 0:
+
+            raise ValueError(
+                "SELL amount must be "
+                "greater than zero."
+            )
+
+        if amount > config[
+            "max_sell"
+        ]:
+
+            raise ValueError(
+                f"{symbol} SELL amount "
+                f"{amount:.8f} "
+                f"{config['token_name']} "
+                f"exceeds maximum "
+                f"{config['max_sell']:.8f}."
+            )
+
+        input_mint = (
+            config[
                 "token_mint"
-            ],
-
-            amount_base_units=
-                amount_base_units
-        )
-    )
-
-    if DRY_RUN:
-
-        return {
-            "status":
-                "DRY_RUN",
-
-            "action":
-                "BUY",
-
-            "symbol":
-                symbol,
-
-            "input":
-                (
-                    f"{amount_quote:.8f} "
-                    f"{config['quote_name']}"
-                ),
-
-            "expected_output":
-                order.get(
-                    "outAmount"
-                ),
-
-            "request_id":
-                order.get(
-                    "requestId"
-                ),
-
-            "router":
-                order.get(
-                    "router"
-                ),
-        }
-
-    signed_transaction = (
-        sign_jupiter_transaction(
-            order["transaction"]
-        )
-    )
-
-    result = (
-        await execute_jupiter_order(
-            signed_transaction=
-                signed_transaction,
-
-            request_id=order[
-                "requestId"
             ]
         )
-    )
 
-    return result
-
-
-# ============================================================
-# SELL
-# ============================================================
-
-async def execute_sell(
-    symbol: str,
-    amount_token: float
-):
-
-    config = (
-        get_token_configuration(
-            symbol
-        )
-    )
-
-    if amount_token <= 0:
-
-        raise ValueError(
-            "SELL amount must be "
-            "greater than zero."
+        output_mint = (
+            config[
+                "quote_mint"
+            ]
         )
 
-    if amount_token > config[
-        "max_sell"
-    ]:
-
-        raise ValueError(
-            f"{symbol} SELL amount "
-            f"{amount_token} "
-            f"{config['token_name']} "
-            f"exceeds maximum "
-            f"{config['max_sell']}."
-        )
-
-    print(
-        "========================================"
-    )
-
-    print(
-        f"EXECUTE {symbol} SELL"
-    )
-
-    print(
-        f"SELL AMOUNT: "
-        f"{amount_token:.8f} "
-        f"{config['token_name']}"
-    )
-
-    print(
-        "========================================"
-    )
-
-    amount_base_units = (
-        token_to_base_units(
-            amount_token,
+        input_decimals = (
             config[
                 "token_decimals"
             ]
         )
+
+        amount_label = (
+            f"{amount:.8f} "
+            f"{config['token_name']}"
+        )
+
+    else:
+
+        raise ValueError(
+            "Action must be BUY or SELL."
+        )
+
+    print(
+        "========================================"
     )
 
-    order = (
-        await get_jupiter_order(
-            input_mint=config[
-                "token_mint"
-            ],
+    print(
+        "EXECUTING SWAP"
+    )
 
-            output_mint=config[
-                "quote_mint"
-            ],
+    print(
+        "SYMBOL:",
+        symbol
+    )
+
+    print(
+        "ACTION:",
+        action
+    )
+
+    print(
+        "AMOUNT:",
+        amount_label
+    )
+
+    print(
+        "GASLESS:",
+        False
+    )
+
+    print(
+        "========================================"
+    )
+
+    # ========================================================
+    # CONVERT AMOUNT
+    # ========================================================
+
+    amount_base_units = (
+        amount_to_base_units(
+            amount,
+            input_decimals
+        )
+    )
+
+    # ========================================================
+    # GET QUOTE
+    # ========================================================
+
+    quote = (
+        await get_jupiter_quote(
+            input_mint=
+                input_mint,
+
+            output_mint=
+                output_mint,
 
             amount_base_units=
                 amount_base_units
         )
     )
+
+    # ========================================================
+    # DRY RUN
+    # ========================================================
 
     if DRY_RUN:
 
@@ -1170,51 +1829,163 @@ async def execute_sell(
                 "DRY_RUN",
 
             "action":
-                "SELL",
+                action,
 
             "symbol":
                 symbol,
 
             "input":
-                (
-                    f"{amount_token:.8f} "
-                    f"{config['token_name']}"
-                ),
+                amount_label,
 
             "expected_output":
-                order.get(
+                quote.get(
                     "outAmount"
                 ),
 
-            "request_id":
-                order.get(
-                    "requestId"
+            "price_impact":
+                quote.get(
+                    "priceImpactPct"
                 ),
 
-            "router":
-                order.get(
-                    "router"
-                ),
+            "gasless":
+                False,
+
+            "network_fee_payer":
+                "wallet",
+
+            "quote":
+                quote,
         }
 
+    # ========================================================
+    # BUILD TRANSACTION
+    # ========================================================
+
+    swap_response = (
+        await build_swap_transaction(
+            quote
+        )
+    )
+
+    unsigned_transaction = (
+        swap_response[
+            "swapTransaction"
+        ]
+    )
+
+    # ========================================================
+    # SIGN
+    # ========================================================
+
     signed_transaction = (
-        sign_jupiter_transaction(
-            order["transaction"]
+        sign_swap_transaction(
+            unsigned_transaction
         )
     )
 
-    result = (
-        await execute_jupiter_order(
-            signed_transaction=
-                signed_transaction,
+    print(
+        "TRANSACTION SIGNED"
+    )
 
-            request_id=order[
-                "requestId"
-            ]
+    # ========================================================
+    # BROADCAST
+    # ========================================================
+
+    signature = (
+        await send_transaction(
+            signed_transaction
         )
     )
 
-    return result
+    # ========================================================
+    # CONFIRM
+    # ========================================================
+
+    confirmation = (
+        await confirm_transaction(
+            signature
+        )
+    )
+
+    print(
+        "========================================"
+    )
+
+    print(
+        "TRANSACTION RESULT"
+    )
+
+    print(
+        "SIGNATURE:",
+        signature
+    )
+
+    print(
+        "CONFIRMATION:",
+        confirmation
+    )
+
+    print(
+        "========================================"
+    )
+
+    if not confirmation.get(
+        "confirmed"
+    ):
+
+        return {
+            "status":
+                confirmation.get(
+                    "status",
+                    "UNKNOWN"
+                ),
+
+            "action":
+                action,
+
+            "symbol":
+                symbol,
+
+            "amount":
+                amount,
+
+            "signature":
+                signature,
+
+            "confirmation":
+                confirmation,
+
+            "gasless":
+                False,
+        }
+
+    return {
+        "status":
+            "CONFIRMED",
+
+        "action":
+            action,
+
+        "symbol":
+            symbol,
+
+        "amount":
+            amount,
+
+        "signature":
+            signature,
+
+        "confirmation":
+            confirmation,
+
+        "expected_output":
+            quote.get(
+                "outAmount"
+            ),
+
+        "gasless":
+            False,
+    }
 
 
 # ============================================================
@@ -1238,15 +2009,17 @@ async def tradingview_webhook(
         "========================================"
     )
 
-    # --------------------------------------------------------
-    # Parse JSON
-    # --------------------------------------------------------
+    # ========================================================
+    # READ JSON
+    # ========================================================
 
     try:
 
         data = await request.json()
 
-        safe_data = dict(data)
+        safe_data = dict(
+            data
+        )
 
         if "secret" in safe_data:
 
@@ -1262,38 +2035,21 @@ async def tradingview_webhook(
     except Exception as exc:
 
         print(
-            "========================================"
-        )
-
-        print(
-            "WEBHOOK JSON ERROR"
-        )
-
-        print(
-            "ERROR TYPE:",
-            type(exc).__name__
-        )
-
-        print(
-            "ERROR MESSAGE:",
+            "WEBHOOK JSON ERROR:",
             exc
-        )
-
-        print(
-            "========================================"
         )
 
         raise HTTPException(
             status_code=400,
             detail=(
-                "Webhook body must "
-                "be valid JSON."
+                "Webhook body must be "
+                "valid JSON."
             )
         )
 
-    # --------------------------------------------------------
-    # Read fields
-    # --------------------------------------------------------
+    # ========================================================
+    # READ FIELDS
+    # ========================================================
 
     secret = str(
         data.get(
@@ -1327,21 +2083,23 @@ async def tradingview_webhook(
             "alertTime"
         )
         or hashlib.sha256(
-            str(data).encode()
+            str(
+                data
+            ).encode()
         ).hexdigest()
     )
 
-    # --------------------------------------------------------
-    # Verify secret
-    # --------------------------------------------------------
+    # ========================================================
+    # VERIFY SECRET
+    # ========================================================
 
     verify_secret(
         secret
     )
 
-    # --------------------------------------------------------
-    # Validate action
-    # --------------------------------------------------------
+    # ========================================================
+    # VALIDATE ACTION
+    # ========================================================
 
     if action not in (
         "BUY",
@@ -1356,9 +2114,9 @@ async def tradingview_webhook(
             )
         )
 
-    # --------------------------------------------------------
-    # Validate symbol
-    # --------------------------------------------------------
+    # ========================================================
+    # VALIDATE SYMBOL
+    # ========================================================
 
     if symbol not in ALLOWED_SYMBOLS:
 
@@ -1372,9 +2130,9 @@ async def tradingview_webhook(
             )
         )
 
-    # --------------------------------------------------------
-    # Duplicate protection
-    # --------------------------------------------------------
+    # ========================================================
+    # DUPLICATE PROTECTION
+    # ========================================================
 
     if alert_already_processed(
         alert_id
@@ -1396,14 +2154,20 @@ async def tradingview_webhook(
                 alert_id,
         }
 
+    # ========================================================
+    # MARK BEFORE EXECUTION
+    # ========================================================
+
     mark_alert_processed(
         alert_id,
         action
     )
 
-    # --------------------------------------------------------
-    # Execute
-    # --------------------------------------------------------
+    # ========================================================
+    # EXECUTE
+    # ========================================================
+
+    amount = 0.0
 
     try:
 
@@ -1415,9 +2179,9 @@ async def tradingview_webhook(
             )
         )
 
-        # ====================================================
+        # ----------------------------------------------------
         # BUY
-        # ====================================================
+        # ----------------------------------------------------
 
         if action == "BUY":
 
@@ -1434,32 +2198,9 @@ async def tradingview_webhook(
                 )
             )
 
-            print(
-                "========================================"
-            )
-
-            print(
-                f"PROCESSING {symbol} BUY"
-            )
-
-            print(
-                f"BUY AMOUNT: "
-                f"{amount:.8f} "
-                f"{config['quote_name']}"
-            )
-
-            print(
-                "========================================"
-            )
-
-            result = await execute_buy(
-                symbol=symbol,
-                amount_quote=amount
-            )
-
-        # ====================================================
+        # ----------------------------------------------------
         # SELL
-        # ====================================================
+        # ----------------------------------------------------
 
         else:
 
@@ -1476,48 +2217,47 @@ async def tradingview_webhook(
                 )
             )
 
-            print(
-                "========================================"
-            )
-
-            print(
-                f"PROCESSING {symbol} SELL"
-            )
-
-            print(
-                f"SELL AMOUNT: "
-                f"{amount:.8f} "
-                f"{config['token_name']}"
-            )
-
-            print(
-                "========================================"
-            )
-
-            result = await execute_sell(
-                symbol=symbol,
-                amount_token=amount
-            )
-
-        # ----------------------------------------------------
-        # Result
-        # ----------------------------------------------------
-
         print(
             "========================================"
         )
 
         print(
-            "TRADE RESULT"
+            "PROCESSING TRADE"
         )
 
         print(
-            result
+            "ACTION:",
+            action
+        )
+
+        print(
+            "SYMBOL:",
+            symbol
+        )
+
+        print(
+            "AMOUNT:",
+            amount
         )
 
         print(
             "========================================"
         )
+
+        result = await execute_swap(
+            symbol=
+                symbol,
+
+            action=
+                action,
+
+            amount=
+                amount
+        )
+
+        # ====================================================
+        # LOG RESULT
+        # ====================================================
 
         result_status = str(
             result.get(
@@ -1541,14 +2281,31 @@ async def tradingview_webhook(
         )
 
         log_trade(
-            alert_id=alert_id,
-            action=action,
-            symbol=symbol,
-            amount=amount,
-            status=result_status,
-            signature=signature,
-            error=error
+            alert_id=
+                alert_id,
+
+            action=
+                action,
+
+            symbol=
+                symbol,
+
+            amount=
+                amount,
+
+            status=
+                result_status,
+
+            signature=
+                signature,
+
+            error=
+                error
         )
+
+        # ====================================================
+        # RESPONSE
+        # ====================================================
 
         response = {
             "status":
@@ -1566,6 +2323,9 @@ async def tradingview_webhook(
             "alert_id":
                 alert_id,
 
+            "gasless":
+                False,
+
             "result":
                 result,
         }
@@ -1576,7 +2336,7 @@ async def tradingview_webhook(
                 "solscan"
             ] = (
                 "https://solscan.io/tx/"
-                f"{signature}"
+                + signature
             )
 
         print(
@@ -1584,7 +2344,7 @@ async def tradingview_webhook(
         )
 
         print(
-            "WEBHOOK COMPLETED SUCCESSFULLY"
+            "WEBHOOK COMPLETED"
         )
 
         print(
@@ -1618,12 +2378,23 @@ async def tradingview_webhook(
         )
 
         log_trade(
-            alert_id=alert_id,
-            action=action,
-            symbol=symbol,
-            amount=0,
-            status="ERROR",
-            error=str(exc)
+            alert_id=
+                alert_id,
+
+            action=
+                action,
+
+            symbol=
+                symbol,
+
+            amount=
+                amount,
+
+            status=
+                "ERROR",
+
+            error=
+                str(exc)
         )
 
         raise HTTPException(
