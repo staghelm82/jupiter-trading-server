@@ -385,7 +385,7 @@ async def load_token_information():
             )
 
         USDC_MINT = str(
-            usdt_token.get(
+            usdc_token.get(
                 "id",
                 ""
             )
