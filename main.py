@@ -87,19 +87,19 @@ SOL_MAX_SELL = float(
 
 
 # ============================================================
-# JUP / USDT SETTINGS
+# JUP / USDC SETTINGS
 # ============================================================
 
-JUP_BUY_AMOUNT_USDT = float(
+JUP_BUY_AMOUNT_USDC = float(
     os.getenv(
-        "JUP_BUY_AMOUNT_USDT",
+        "JUP_BUY_AMOUNT_USDC",
         "0.25"
     )
 )
 
-JUP_MIN_BUY_USDT = float(
+JUP_MIN_BUY_USDC = float(
     os.getenv(
-        "JUP_MIN_BUY_USDT",
+        "JUP_MIN_BUY_USDC",
         "0.25"
     )
 )
@@ -111,9 +111,9 @@ JUP_SELL_AMOUNT = float(
     )
 )
 
-JUP_MAX_BUY_USDT = float(
+JUP_MAX_BUY_USDC = float(
     os.getenv(
-        "JUP_MAX_BUY_USDT",
+        "JUP_MAX_BUY_USDC",
         "100"
     )
 )
@@ -159,6 +159,7 @@ RPC_CONFIRM_TIMEOUT_SECONDS = int(
 ALLOWED_SYMBOLS = {
     "SOL/USDC",
     "JUP/USDT",
+    "JUP/USDC",
 }
 
 
