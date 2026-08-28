@@ -32,8 +32,8 @@ BS58_PRIVATE_KEY = os.getenv("BS58_PRIVATE_KEY", "").strip()
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-BUY_AMOUNT_USDC = float(os.getenv("BUY_AMOUNT_USDC", "20"))
-SELL_AMOUNT_SOL = float(os.getenv("SELL_AMOUNT_SOL", "0.316717183"))
+BUY_AMOUNT_USDC = float(os.getenv("BUY_AMOUNT_USDC", "0.25"))
+SELL_AMOUNT_SOL = float(os.getenv("SELL_AMOUNT_SOL", "0.002"))
 
 MAX_BUY_USDC = float(os.getenv("MAX_BUY_USDC", "100"))
 MAX_SELL_SOL = float(os.getenv("MAX_SELL_SOL", "1"))
@@ -597,8 +597,11 @@ async def tradingview_webhook(
     request: Request
 ):
 
-    try:
+    print("========================================")
+    print("TRADINGVIEW WEBHOOK RECEIVED")
+    print("========================================")
 
+    try:
         data = await request.json()
 
     except Exception:
