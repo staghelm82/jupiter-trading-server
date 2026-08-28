@@ -1,4 +1,3 @@
-```python
 import os
 import base64
 import hashlib
@@ -812,4 +811,3 @@ async def tradingview_webhook(
             status_code=500,
             detail=str(exc)
         )
-```
