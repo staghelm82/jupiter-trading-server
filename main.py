@@ -1,3 +1,4 @@
+```python
 import os
 import base64
 import hashlib
@@ -32,8 +33,8 @@ BS58_PRIVATE_KEY = os.getenv("BS58_PRIVATE_KEY", "").strip()
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-BUY_AMOUNT_USDC = float(os.getenv("BUY_AMOUNT_USDC", "0.25"))
-SELL_AMOUNT_SOL = float(os.getenv("SELL_AMOUNT_SOL", "0.002"))
+BUY_AMOUNT_USDC = float(os.getenv("BUY_AMOUNT_USDC", "20"))
+SELL_AMOUNT_SOL = float(os.getenv("SELL_AMOUNT_SOL", "0.316717183"))
 
 MAX_BUY_USDC = float(os.getenv("MAX_BUY_USDC", "100"))
 MAX_SELL_SOL = float(os.getenv("MAX_SELL_SOL", "1"))
@@ -602,7 +603,9 @@ async def tradingview_webhook(
     print("========================================")
 
     try:
+
         data = await request.json()
+
         print("WEBHOOK DATA:", data)
 
     except Exception:
@@ -715,6 +718,9 @@ async def tradingview_webhook(
                 amount
             )
 
+            # Diagnostic output
+            print("BUY RESULT:", result)
+
         # ----------------------------------------------------
         # SELL
         # ----------------------------------------------------
@@ -731,6 +737,9 @@ async def tradingview_webhook(
             result = await execute_sell(
                 amount
             )
+
+            # Diagnostic output
+            print("SELL RESULT:", result)
 
         # ----------------------------------------------------
         # Determine status
@@ -803,3 +812,4 @@ async def tradingview_webhook(
             status_code=500,
             detail=str(exc)
         )
+```
