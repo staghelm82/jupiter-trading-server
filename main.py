@@ -603,6 +603,7 @@ async def tradingview_webhook(
 
     try:
         data = await request.json()
+        print("WEBHOOK DATA:", data)
 
     except Exception:
 
