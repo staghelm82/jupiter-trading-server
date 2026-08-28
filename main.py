@@ -293,13 +293,13 @@ def load_wallet():
 
 
 # ============================================================
-# LOOK UP USDT THROUGH JUPITER
+# LOOK UP USDC THROUGH JUPITER
 # ============================================================
 
 async def load_token_information():
 
-    global USDT_MINT
-    global USDT_DECIMALS
+    global USDC_MINT
+    global USDC_DECIMALS
     global JUP_DECIMALS
 
     if not JUPITER_API_KEY:
@@ -319,13 +319,13 @@ async def load_token_information():
     ) as client:
 
         # ----------------------------------------------------
-        # Search USDT
+        # Search USDC
         # ----------------------------------------------------
 
         response = await client.get(
             f"{JUPITER_TOKEN_API_URL}/search",
             params={
-                "query": "USDT"
+                "query": "USDC"
             },
             headers=headers
         )
@@ -333,7 +333,7 @@ async def load_token_information():
         if response.status_code != 200:
 
             raise RuntimeError(
-                "Unable to look up USDT through "
+                "Unable to look up USDC through "
                 f"Jupiter Tokens API "
                 f"({response.status_code}): "
                 f"{response.text}"
@@ -348,10 +348,10 @@ async def load_token_information():
 
             raise RuntimeError(
                 "Unexpected Jupiter Tokens API "
-                "response for USDT."
+                "response for USDC."
             )
 
-        # Prefer exact USDT symbol.
+        # Prefer exact USDC symbol.
         usdt_token = None
 
         for token in tokens:
@@ -370,41 +370,41 @@ async def load_token_information():
                 )
             ).upper()
 
-            if symbol == "USDT":
+            if symbol == "USDC":
 
-                usdt_token = token
+                usdc_token = token
 
                 break
 
-            if name == "TETHER USD":
+            if name == "USDC USD":
 
                 usdt_token = token
 
-        if usdt_token is None:
+        if usdc_token is None:
 
             raise RuntimeError(
                 "Could not find the official "
                 "USDT token through Jupiter."
             )
 
-        USDT_MINT = str(
+        USDC_MINT = str(
             usdt_token.get(
                 "id",
                 ""
             )
         )
 
-        USDT_DECIMALS = int(
-            usdt_token.get(
+        USDC_DECIMALS = int(
+            usdc_token.get(
                 "decimals",
                 6
             )
         )
 
-        if not USDT_MINT:
+        if not USDC_MINT:
 
             raise RuntimeError(
-                "Jupiter returned USDT without "
+                "Jupiter returned USDC without "
                 "a mint address."
             )
 
@@ -469,13 +469,13 @@ async def load_token_information():
     )
 
     print(
-        "USDT MINT:",
-        USDT_MINT
+        "USDC MINT:",
+        USDC_MINT
     )
 
     print(
-        "USDT DECIMALS:",
-        USDT_DECIMALS
+        "USDC DECIMALS:",
+        USDC_DECIMALS
     )
 
     print(
@@ -698,14 +698,14 @@ async def startup_event():
 
     print(
         "JUP BUY DEFAULT:",
-        JUP_BUY_AMOUNT_USDT,
-        "USDT"
+        JUP_BUY_AMOUNT_USDC,
+        "USDC"
     )
 
     print(
         "JUP MINIMUM BUY:",
-        JUP_MIN_BUY_USDT,
-        "USDT"
+        JUP_MIN_BUY_USDC,
+        "USDC"
     )
 
     print(
@@ -769,8 +769,8 @@ async def root():
                 ALLOWED_SYMBOLS
             ),
 
-        "jup_min_buy_usdt":
-            JUP_MIN_BUY_USDT,
+        "jup_min_buy_usdc":
+            JUP_MIN_BUY_USDC,
 
         "gasless":
             False,
@@ -805,11 +805,11 @@ async def health():
                 ALLOWED_SYMBOLS
             ),
 
-        "jup_min_buy_usdt":
-            JUP_MIN_BUY_USDT,
+        "jup_min_buy_usdc":
+            JUP_MIN_BUY_USDC,
 
-        "usdt_mint_loaded":
-            USDT_MINT is not None,
+        "usdc_mint_loaded":
+            USDC_MINT is not None,
 
         "rpc_configured":
             bool(
@@ -929,23 +929,23 @@ def get_token_configuration(
                 6,
         }
 
-    if symbol == "JUP/USDT":
+    if symbol == "JUP/USDC":
 
-        if USDT_MINT is None:
+        if USDC_MINT is None:
 
             raise RuntimeError(
-                "USDT mint has not been loaded."
+                "USDC mint has not been loaded."
             )
 
         return {
             "symbol":
-                "JUP/USDT",
+                "JUP/USDC",
 
             "token_name":
                 "JUP",
 
             "quote_name":
-                "USDT",
+                "USDC",
 
             "token_mint":
                 JUP_MINT,
@@ -954,16 +954,16 @@ def get_token_configuration(
                 USDT_MINT,
 
             "buy_amount":
-                JUP_BUY_AMOUNT_USDT,
+                JUP_BUY_AMOUNT_USDC,
 
             "sell_amount":
                 JUP_SELL_AMOUNT,
 
             "min_buy":
-                JUP_MIN_BUY_USDT,
+                JUP_MIN_BUY_USDC,
 
             "max_buy":
-                JUP_MAX_BUY_USDT,
+                JUP_MAX_BUY_USDC,
 
             "max_sell":
                 JUP_MAX_SELL,
@@ -972,7 +972,7 @@ def get_token_configuration(
                 JUP_DECIMALS,
 
             "quote_decimals":
-                USDT_DECIMALS,
+                USDC_DECIMALS,
         }
 
     raise ValueError(
