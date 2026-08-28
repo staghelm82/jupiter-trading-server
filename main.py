@@ -98,6 +98,11 @@ def load_wallet():
 
         wallet = Keypair.from_seed(seed)
 
+        print("========================================")
+        print("SOLANA WALLET LOADED")
+        print("WALLET ADDRESS:", wallet.pubkey())
+        print("========================================")
+
     except Exception as exc:
         raise RuntimeError(
             "Unable to load the Solana wallet private key."
@@ -232,8 +237,20 @@ def log_trade(
 
 @app.on_event("startup")
 async def startup_event():
+    print("========================================")
+    print("APPLICATION STARTING")
+    print("========================================")
+
     init_database()
     load_wallet()
+
+    print("DRY_RUN:", DRY_RUN)
+    print("BUY_AMOUNT_USDC:", BUY_AMOUNT_USDC)
+    print("SELL_AMOUNT_SOL:", SELL_AMOUNT_SOL)
+    print("ALLOWED_SYMBOL:", ALLOWED_SYMBOL)
+    print("JUPITER_API_KEY_LOADED:", bool(JUPITER_API_KEY))
+    print("WEBHOOK_SECRET_LOADED:", bool(WEBHOOK_SECRET))
+    print("========================================")
 
 
 # ============================================================
@@ -408,6 +425,14 @@ async def get_jupiter_order(
         "x-api-key": JUPITER_API_KEY
     }
 
+    print("========================================")
+    print("REQUESTING JUPITER ORDER")
+    print("INPUT MINT:", input_mint)
+    print("OUTPUT MINT:", output_mint)
+    print("AMOUNT BASE UNITS:", amount_base_units)
+    print("TAKER:", wallet.pubkey())
+    print("========================================")
+
     async with httpx.AsyncClient(
         timeout=30.0
     ) as client:
@@ -418,7 +443,11 @@ async def get_jupiter_order(
             headers=headers
         )
 
+    print("JUPITER ORDER HTTP STATUS:", response.status_code)
+
     if response.status_code != 200:
+
+        print("JUPITER ORDER RESPONSE:", response.text)
 
         raise RuntimeError(
             f"Jupiter /order failed "
@@ -427,6 +456,11 @@ async def get_jupiter_order(
         )
 
     order = response.json()
+
+    print("JUPITER ORDER RECEIVED")
+    print("REQUEST ID:", order.get("requestId"))
+    print("EXPECTED OUTPUT:", order.get("outAmount"))
+    print("ROUTER:", order.get("router"))
 
     if order.get("error"):
         raise RuntimeError(
@@ -502,6 +536,11 @@ async def execute_buy(
             f"${MAX_BUY_USDC:.2f}."
         )
 
+    print("========================================")
+    print("EXECUTE BUY")
+    print(f"BUY AMOUNT: ${amount_usdc:.2f} USDC")
+    print("========================================")
+
     amount_base_units = usdc_to_base_units(
         amount_usdc
     )
@@ -514,7 +553,7 @@ async def execute_buy(
 
     if DRY_RUN:
 
-        return {
+        result = {
             "status": "DRY_RUN",
             "action": "BUY",
             "input": f"${amount_usdc:.2f} USDC",
@@ -522,6 +561,8 @@ async def execute_buy(
             "request_id": order.get("requestId"),
             "router": order.get("router"),
         }
+
+        return result
 
     signed_transaction = sign_jupiter_transaction(
         order["transaction"]
@@ -555,6 +596,11 @@ async def execute_sell(
             f"{MAX_SELL_SOL}."
         )
 
+    print("========================================")
+    print("EXECUTE SELL")
+    print(f"SELL AMOUNT: {amount_sol} SOL")
+    print("========================================")
+
     amount_base_units = sol_to_lamports(
         amount_sol
     )
@@ -567,7 +613,7 @@ async def execute_sell(
 
     if DRY_RUN:
 
-        return {
+        result = {
             "status": "DRY_RUN",
             "action": "SELL",
             "input": f"{amount_sol} SOL",
@@ -575,6 +621,8 @@ async def execute_sell(
             "request_id": order.get("requestId"),
             "router": order.get("router"),
         }
+
+        return result
 
     signed_transaction = sign_jupiter_transaction(
         order["transaction"]
@@ -605,9 +653,22 @@ async def tradingview_webhook(
 
         data = await request.json()
 
-        print("WEBHOOK DATA:", data)
+        # Do NOT print the secret itself.
+        safe_data = dict(data)
 
-    except Exception:
+        if "secret" in safe_data:
+            safe_data["secret"] = "HIDDEN"
+
+        print("WEBHOOK DATA:", safe_data)
+
+    except Exception as exc:
+
+        print("========================================")
+        print("WEBHOOK JSON ERROR")
+        print("========================================")
+        print(f"ERROR TYPE: {type(exc).__name__}")
+        print(f"ERROR MESSAGE: {exc}")
+        print("========================================")
 
         raise HTTPException(
             status_code=400,
@@ -643,7 +704,20 @@ async def tradingview_webhook(
     # Verify secret
     # --------------------------------------------------------
 
-    verify_secret(secret)
+    try:
+
+        verify_secret(secret)
+
+    except Exception as exc:
+
+        print("========================================")
+        print("WEBHOOK SECURITY ERROR")
+        print("========================================")
+        print(f"ERROR TYPE: {type(exc).__name__}")
+        print(f"ERROR MESSAGE: {exc}")
+        print("========================================")
+
+        raise
 
     # --------------------------------------------------------
     # Validate action
@@ -676,6 +750,10 @@ async def tradingview_webhook(
 
     if alert_already_processed(alert_id):
 
+        print(
+            f"DUPLICATE ALERT IGNORED: {alert_id}"
+        )
+
         return {
             "status": "ignored",
             "reason": "duplicate_alert",
@@ -687,13 +765,14 @@ async def tradingview_webhook(
     # This prevents two simultaneous TradingView webhook
     # requests from executing the same alert twice.
     #
+
     mark_alert_processed(
         alert_id,
         action
     )
 
     # --------------------------------------------------------
-    # Configuration
+    # Configuration and execution
     # --------------------------------------------------------
 
     try:
@@ -713,12 +792,20 @@ async def tradingview_webhook(
                 )
             )
 
+            print("========================================")
+            print("PROCESSING BUY")
+            print("========================================")
+            print(f"BUY AMOUNT: ${amount:.2f} USDC")
+
             result = await execute_buy(
                 amount
             )
 
-            # Diagnostic output
-            print("BUY RESULT:", result)
+            print("========================================")
+            print("BUY RESULT")
+            print("========================================")
+            print(result)
+            print("========================================")
 
         # ----------------------------------------------------
         # SELL
@@ -733,12 +820,20 @@ async def tradingview_webhook(
                 )
             )
 
+            print("========================================")
+            print("PROCESSING SELL")
+            print("========================================")
+            print(f"SELL AMOUNT: {amount} SOL")
+
             result = await execute_sell(
                 amount
             )
 
-            # Diagnostic output
-            print("SELL RESULT:", result)
+            print("========================================")
+            print("SELL RESULT")
+            print("========================================")
+            print(result)
+            print("========================================")
 
         # ----------------------------------------------------
         # Determine status
@@ -794,27 +889,31 @@ async def tradingview_webhook(
                 f"https://solscan.io/tx/{signature}"
             )
 
+        print("========================================")
+        print("WEBHOOK COMPLETED SUCCESSFULLY")
+        print("========================================")
+
         return response
 
-   except Exception as exc:
+    except Exception as exc:
 
-    print("========================================")
-    print("WEBHOOK ERROR")
-    print("========================================")
-    print(f"ERROR TYPE: {type(exc).__name__}")
-    print(f"ERROR MESSAGE: {exc}")
-    print("========================================")
+        print("========================================")
+        print("WEBHOOK ERROR")
+        print("========================================")
+        print(f"ERROR TYPE: {type(exc).__name__}")
+        print(f"ERROR MESSAGE: {exc}")
+        print("========================================")
 
-    log_trade(
-        alert_id=alert_id,
-        action=action,
-        symbol=symbol,
-        amount=0,
-        status="ERROR",
-        error=str(exc)
-    )
+        log_trade(
+            alert_id=alert_id,
+            action=action,
+            symbol=symbol,
+            amount=0,
+            status="ERROR",
+            error=str(exc)
+        )
 
-    raise HTTPException(
-        status_code=500,
-        detail=str(exc)
-    )
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
