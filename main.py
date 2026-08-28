@@ -158,8 +158,7 @@ RPC_CONFIRM_TIMEOUT_SECONDS = int(
 
 ALLOWED_SYMBOLS = {
     "SOL/USDC",
-    "JUP/USDT",
-    "JUP/USDC",
+        "JUP/USDC",
 }
 
 
@@ -223,8 +222,6 @@ wallet: Optional[Keypair] = None
 # DYNAMIC TOKEN DATA
 # ============================================================
 
-USDT_MINT: Optional[str] = None
-USDT_DECIMALS: int = 6
 
 JUP_DECIMALS: int = 6
 
@@ -352,7 +349,7 @@ async def load_token_information():
             )
 
         # Prefer exact USDC symbol.
-        usdt_token = None
+        usdc_token = None
 
         for token in tokens:
 
@@ -378,13 +375,13 @@ async def load_token_information():
 
             if name == "USDC USD":
 
-                usdt_token = token
+                usdc_token = token
 
         if usdc_token is None:
 
             raise RuntimeError(
                 "Could not find the official "
-                "USDT token through Jupiter."
+                "USDC token through Jupiter."
             )
 
         USDC_MINT = str(
@@ -951,7 +948,7 @@ def get_token_configuration(
                 JUP_MINT,
 
             "quote_mint":
-                USDT_MINT,
+                USDC_MINT,
 
             "buy_amount":
                 JUP_BUY_AMOUNT_USDC,
