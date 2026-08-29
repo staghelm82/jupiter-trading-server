@@ -1227,10 +1227,10 @@ async def build_swap_transaction(
         "prioritizationFeeLamports": {
             "priorityLevelWithMaxLamports": {
                 "priorityLevel":
-                    "veryHigh",
+                    "high",
 
                 "maxLamports":
-                    1_000_000
+                    100_000
             }
         }
     }
