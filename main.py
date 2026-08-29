@@ -37,10 +37,19 @@ WEBHOOK_SECRET = os.getenv(
     ""
 ).strip()
 
-BS58_PRIVATE_KEY = os.getenv(
-    "BS58_PRIVATE_KEY",
+SOL_BS58_PRIVATE_KEY = os.getenv(
+    "SOL_BS58_PRIVATE_KEY",
     ""
 ).strip()
+
+JUP_BS58_PRIVATE_KEY = os.getenv(
+    "JUP_BS58_PRIVATE_KEY",
+    ""
+).strip()
+
+# Public wallet addresses are used as startup safety checks.
+SOL_WALLET_ADDRESS = "DcJGSj8xRxTPdGfBByAdqmL8PVnyRbhLG9FFrhrzECEg"
+JUP_WALLET_ADDRESS = "HtT953GznNSXCn16BNSQdwfv3UZP1MqrPh1eD8gPrLfd"
 
 SOLANA_RPC_URL = os.getenv(
     "SOLANA_RPC_URL",
@@ -215,7 +224,8 @@ app = FastAPI(
 # WALLET
 # ============================================================
 
-wallet: Optional[Keypair] = None
+sol_wallet: Optional[Keypair] = None
+jup_wallet: Optional[Keypair] = None
 
 
 # ============================================================
@@ -230,63 +240,80 @@ JUP_DECIMALS: int = 6
 # LOAD WALLET
 # ============================================================
 
-def load_wallet():
+def load_wallets():
 
-    global wallet
+    global sol_wallet
+    global jup_wallet
 
-    if not BS58_PRIVATE_KEY:
+    wallet_configs = [
+        ("SOL", SOL_BS58_PRIVATE_KEY, SOL_WALLET_ADDRESS),
+        ("JUP", JUP_BS58_PRIVATE_KEY, JUP_WALLET_ADDRESS),
+    ]
 
-        raise RuntimeError(
-            "BS58_PRIVATE_KEY is not configured."
-        )
+    loaded_wallets = {}
 
-    try:
+    for name, private_key, expected_address in wallet_configs:
 
-        import base58
-
-        decoded_key = base58.b58decode(
-            BS58_PRIVATE_KEY
-        )
-
-        if len(decoded_key) != 64:
-
-            raise ValueError(
-                f"Expected 64 decoded bytes, "
-                f"got {len(decoded_key)}."
+        if not private_key:
+            raise RuntimeError(
+                f"{name}_BS58_PRIVATE_KEY is not configured."
             )
 
-        # Jupiter wallet export is 64 bytes.
-        #
-        # The first 32 bytes are the seed.
-        #
-        seed = decoded_key[:32]
+        try:
+            import base58
 
-        wallet = Keypair.from_seed(
-            seed
-        )
+            decoded_key = base58.b58decode(private_key)
 
-        print(
-            "========================================"
-        )
+            if len(decoded_key) != 64:
+                raise ValueError(
+                    f"Expected 64 decoded bytes, got {len(decoded_key)}."
+                )
 
-        print(
-            "SOLANA WALLET LOADED"
-        )
+            # Jupiter wallet export is 64 bytes.
+            # The first 32 bytes are the seed.
+            seed = decoded_key[:32]
 
-        print(
-            "WALLET ADDRESS:",
-            wallet.pubkey()
-        )
+            loaded_wallet = Keypair.from_seed(seed)
+            derived_address = str(loaded_wallet.pubkey())
 
-        print(
-            "========================================"
-        )
+            if derived_address != expected_address:
+                raise RuntimeError(
+                    f"{name} wallet key does not match the configured "
+                    f"{name} wallet address. Expected {expected_address}, "
+                    f"derived {derived_address}."
+                )
 
-    except Exception as exc:
+            loaded_wallets[name] = loaded_wallet
 
-        raise RuntimeError(
-            "Unable to load the Solana wallet private key."
-        ) from exc
+            print("========================================")
+            print(f"{name} WALLET LOADED")
+            print("WALLET ADDRESS:", derived_address)
+            print("========================================")
+
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to load the {name} Solana wallet private key."
+            ) from exc
+
+    sol_wallet = loaded_wallets["SOL"]
+    jup_wallet = loaded_wallets["JUP"]
+
+
+def get_wallet_for_symbol(symbol: str) -> Keypair:
+
+    symbol = symbol.upper()
+
+    if symbol == "SOL/USDC":
+        if sol_wallet is None:
+            raise RuntimeError("SOL wallet is not loaded.")
+        return sol_wallet
+
+    if symbol == "JUP/USDC":
+        if jup_wallet is None:
+            raise RuntimeError("JUP wallet is not loaded.")
+        return jup_wallet
+
+    raise ValueError(f"No wallet configured for symbol: {symbol}")
 
 
 # ============================================================
@@ -660,7 +687,7 @@ async def startup_event():
 
     init_database()
 
-    load_wallet()
+    load_wallets()
 
     await load_token_information()
 
@@ -709,6 +736,16 @@ async def startup_event():
         "JUP SELL DEFAULT:",
         JUP_SELL_AMOUNT,
         "JUP"
+    )
+
+    print(
+        "SOL WALLET:",
+        SOL_WALLET_ADDRESS
+    )
+
+    print(
+        "JUP WALLET:",
+        JUP_WALLET_ADDRESS
     )
 
     print(
@@ -784,8 +821,17 @@ async def health():
         "dry_run":
             DRY_RUN,
 
-        "wallet_loaded":
-            wallet is not None,
+        "sol_wallet_loaded":
+            sol_wallet is not None,
+
+        "jup_wallet_loaded":
+            jup_wallet is not None,
+
+        "sol_wallet_address":
+            SOL_WALLET_ADDRESS,
+
+        "jup_wallet_address":
+            JUP_WALLET_ADDRESS,
 
         "jupiter_api_key_loaded":
             bool(
@@ -863,10 +909,10 @@ def validate_live_configuration():
             "JUPITER_API_KEY is missing."
         )
 
-    if wallet is None:
+    if sol_wallet is None or jup_wallet is None:
 
         raise RuntimeError(
-            "Solana wallet is not loaded."
+            "Both SOL and JUP wallets must be loaded."
         )
 
     if not SOLANA_RPC_URL:
@@ -1151,14 +1197,9 @@ async def get_jupiter_quote(
 # ============================================================
 
 async def build_swap_transaction(
-    quote_response: dict
+    quote_response: dict,
+    wallet: Keypair
 ):
-
-    if wallet is None:
-
-        raise RuntimeError(
-            "Wallet is not loaded."
-        )
 
     headers = {
         "Content-Type":
@@ -1280,14 +1321,9 @@ async def build_swap_transaction(
 # ============================================================
 
 def sign_swap_transaction(
-    transaction_base64: str
+    transaction_base64: str,
+    wallet: Keypair
 ) -> str:
-
-    if wallet is None:
-
-        raise RuntimeError(
-            "Wallet is not loaded."
-        )
 
     raw_transaction = (
         base64.b64decode(
@@ -1640,6 +1676,8 @@ async def execute_swap(
         )
     )
 
+    wallet = get_wallet_for_symbol(symbol)
+
     # ========================================================
     # BUY
     # ========================================================
@@ -1861,7 +1899,8 @@ async def execute_swap(
 
     swap_response = (
         await build_swap_transaction(
-            quote
+            quote,
+            wallet
         )
     )
 
@@ -1877,7 +1916,8 @@ async def execute_swap(
 
     signed_transaction = (
         sign_swap_transaction(
-            unsigned_transaction
+            unsigned_transaction,
+            wallet
         )
     )
 
@@ -2131,9 +2171,15 @@ async def tradingview_webhook(
     # ========================================================
     # DUPLICATE PROTECTION
     # ========================================================
+    #
+    # Include symbol and action so an identical TradingView
+    # timestamp cannot cause a SOL alert to block a JUP alert.
+    # ========================================================
+
+    alert_key = f"{symbol}:{action}:{alert_id}"
 
     if alert_already_processed(
-        alert_id
+        alert_key
     ):
 
         print(
