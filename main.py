@@ -1,4 +1,4 @@
-import os
+
 import base64
 import hashlib
 import hmac
@@ -47,9 +47,15 @@ JUP_BS58_PRIVATE_KEY = os.getenv(
     ""
 ).strip()
 
+BONK_BS58_PRIVATE_KEY = os.getenv(
+    "BONK_BS58_PRIVATE_KEY",
+    ""
+).strip()
+
 # Public wallet addresses are used as startup safety checks.
 SOL_WALLET_ADDRESS = "DcJGSj8xRxTPdGfBByAdqmL8PVnyRbhLG9FFrhrzECEg"
 JUP_WALLET_ADDRESS = "HtT953GznNSXCn16BNSQdwfv3UZP1MqrPh1eD8gPrLfd"
+BONK_WALLET_ADDRESS = "3W5Pgzjp951dKPe2ecdRudGKNT3aVJ3vzMz5gagD9SV9"
 
 SOLANA_RPC_URL = os.getenv(
     "SOLANA_RPC_URL",
@@ -136,6 +142,46 @@ JUP_MAX_SELL = float(
 
 
 # ============================================================
+# BONK / USDC SETTINGS
+# ============================================================
+
+BONK_BUY_AMOUNT_USDC = float(
+    os.getenv(
+        "BONK_BUY_AMOUNT_USDC",
+        "2"
+    )
+)
+
+BONK_SELL_AMOUNT = float(
+    os.getenv(
+        "BONK_SELL_AMOUNT",
+        "100000"
+    )
+)
+
+BONK_MIN_BUY_USDC = float(
+    os.getenv(
+        "BONK_MIN_BUY_USDC",
+        "0.01"
+    )
+)
+
+BONK_MAX_BUY_USDC = float(
+    os.getenv(
+        "BONK_MAX_BUY_USDC",
+        "100"
+    )
+)
+
+BONK_MAX_SELL = float(
+    os.getenv(
+        "BONK_MAX_SELL",
+        "100000000"
+    )
+)
+
+
+# ============================================================
 # TRADING SETTINGS
 # ============================================================
 
@@ -168,6 +214,7 @@ RPC_CONFIRM_TIMEOUT_SECONDS = int(
 ALLOWED_SYMBOLS = {
     "SOL/USDC",
         "JUP/USDC",
+    "BONK/USDC",
 }
 
 
@@ -185,6 +232,10 @@ USDC_MINT = (
 
 JUP_MINT = (
     "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+)
+
+BONK_MINT = (
+    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
 )
 
 
@@ -226,6 +277,7 @@ app = FastAPI(
 
 sol_wallet: Optional[Keypair] = None
 jup_wallet: Optional[Keypair] = None
+bonk_wallet: Optional[Keypair] = None
 
 
 # ============================================================
@@ -234,6 +286,7 @@ jup_wallet: Optional[Keypair] = None
 
 
 JUP_DECIMALS: int = 6
+BONK_DECIMALS: int = 5
 
 
 # ============================================================
@@ -244,10 +297,12 @@ def load_wallets():
 
     global sol_wallet
     global jup_wallet
+    global bonk_wallet
 
     wallet_configs = [
         ("SOL", SOL_BS58_PRIVATE_KEY, SOL_WALLET_ADDRESS),
         ("JUP", JUP_BS58_PRIVATE_KEY, JUP_WALLET_ADDRESS),
+        ("BONK", BONK_BS58_PRIVATE_KEY, BONK_WALLET_ADDRESS),
     ]
 
     loaded_wallets = {}
@@ -297,6 +352,7 @@ def load_wallets():
 
     sol_wallet = loaded_wallets["SOL"]
     jup_wallet = loaded_wallets["JUP"]
+    bonk_wallet = loaded_wallets["BONK"]
 
 
 def get_wallet_for_symbol(symbol: str) -> Keypair:
@@ -313,6 +369,11 @@ def get_wallet_for_symbol(symbol: str) -> Keypair:
             raise RuntimeError("JUP wallet is not loaded.")
         return jup_wallet
 
+    if symbol == "BONK/USDC":
+        if bonk_wallet is None:
+            raise RuntimeError("BONK wallet is not loaded.")
+        return bonk_wallet
+
     raise ValueError(f"No wallet configured for symbol: {symbol}")
 
 
@@ -325,6 +386,7 @@ async def load_token_information():
     global USDC_MINT
     global USDC_DECIMALS
     global JUP_DECIMALS
+    global BONK_DECIMALS
 
     if not JUPITER_API_KEY:
 
@@ -474,6 +536,10 @@ async def load_token_information():
 
                         break
 
+    # BONK uses 5 decimals. The mint is hard-coded above and also
+    # validated by the token configuration below.
+    BONK_DECIMALS = 5
+
     print(
         "========================================"
     )
@@ -490,6 +556,16 @@ async def load_token_information():
     print(
         "JUP DECIMALS:",
         JUP_DECIMALS
+    )
+
+    print(
+        "BONK MINT:",
+        BONK_MINT
+    )
+
+    print(
+        "BONK DECIMALS:",
+        BONK_DECIMALS
     )
 
     print(
@@ -739,6 +815,24 @@ async def startup_event():
     )
 
     print(
+        "BONK BUY DEFAULT:",
+        BONK_BUY_AMOUNT_USDC,
+        "USDC"
+    )
+
+    print(
+        "BONK MINIMUM BUY:",
+        BONK_MIN_BUY_USDC,
+        "USDC"
+    )
+
+    print(
+        "BONK SELL DEFAULT:",
+        BONK_SELL_AMOUNT,
+        "BONK"
+    )
+
+    print(
         "SOL WALLET:",
         SOL_WALLET_ADDRESS
     )
@@ -746,6 +840,11 @@ async def startup_event():
     print(
         "JUP WALLET:",
         JUP_WALLET_ADDRESS
+    )
+
+    print(
+        "BONK WALLET:",
+        BONK_WALLET_ADDRESS
     )
 
     print(
@@ -806,6 +905,9 @@ async def root():
         "jup_min_buy_usdc":
             JUP_MIN_BUY_USDC,
 
+        "bonk_min_buy_usdc":
+            BONK_MIN_BUY_USDC,
+
         "gasless":
             False,
     }
@@ -827,11 +929,17 @@ async def health():
         "jup_wallet_loaded":
             jup_wallet is not None,
 
+        "bonk_wallet_loaded":
+            bonk_wallet is not None,
+
         "sol_wallet_address":
             SOL_WALLET_ADDRESS,
 
         "jup_wallet_address":
             JUP_WALLET_ADDRESS,
+
+        "bonk_wallet_address":
+            BONK_WALLET_ADDRESS,
 
         "jupiter_api_key_loaded":
             bool(
@@ -850,6 +958,9 @@ async def health():
 
         "jup_min_buy_usdc":
             JUP_MIN_BUY_USDC,
+
+        "bonk_min_buy_usdc":
+            BONK_MIN_BUY_USDC,
 
         "usdc_mint_loaded":
             USDC_MINT is not None,
@@ -909,10 +1020,10 @@ def validate_live_configuration():
             "JUPITER_API_KEY is missing."
         )
 
-    if sol_wallet is None or jup_wallet is None:
+    if sol_wallet is None or jup_wallet is None or bonk_wallet is None:
 
         raise RuntimeError(
-            "Both SOL and JUP wallets must be loaded."
+            "SOL, JUP, and BONK wallets must all be loaded."
         )
 
     if not SOLANA_RPC_URL:
@@ -1013,6 +1124,52 @@ def get_token_configuration(
 
             "token_decimals":
                 JUP_DECIMALS,
+
+            "quote_decimals":
+                USDC_DECIMALS,
+        }
+
+    if symbol == "BONK/USDC":
+
+        if USDC_MINT is None:
+
+            raise RuntimeError(
+                "USDC mint has not been loaded."
+            )
+
+        return {
+            "symbol":
+                "BONK/USDC",
+
+            "token_name":
+                "BONK",
+
+            "quote_name":
+                "USDC",
+
+            "token_mint":
+                BONK_MINT,
+
+            "quote_mint":
+                USDC_MINT,
+
+            "buy_amount":
+                BONK_BUY_AMOUNT_USDC,
+
+            "sell_amount":
+                BONK_SELL_AMOUNT,
+
+            "min_buy":
+                BONK_MIN_BUY_USDC,
+
+            "max_buy":
+                BONK_MAX_BUY_USDC,
+
+            "max_sell":
+                BONK_MAX_SELL,
+
+            "token_decimals":
+                BONK_DECIMALS,
 
             "quote_decimals":
                 USDC_DECIMALS,
@@ -2200,10 +2357,12 @@ async def tradingview_webhook(
 
     # ========================================================
     # MARK BEFORE EXECUTION
+    # Use symbol + action + alert ID so separate SOL/JUP/BONK
+    # strategies cannot block one another with the same alert ID.
     # ========================================================
 
     mark_alert_processed(
-        alert_id,
+        alert_key,
         action
     )
 
