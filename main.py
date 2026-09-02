@@ -1,3 +1,4 @@
+import os
 import base64
 import hashlib
 import hmac
@@ -308,7 +309,12 @@ def load_wallets():
 
     for name, private_key, expected_address in wallet_configs:
 
+        # BONK can be added independently. Do not prevent the server
+        # from starting if its private key has not been added yet.
         if not private_key:
+            if name == "BONK":
+                print("BONK wallet key not configured yet; BONK trading disabled.")
+                continue
             raise RuntimeError(
                 f"{name}_BS58_PRIVATE_KEY is not configured."
             )
@@ -349,9 +355,9 @@ def load_wallets():
                 f"Unable to load the {name} Solana wallet private key."
             ) from exc
 
-    sol_wallet = loaded_wallets["SOL"]
-    jup_wallet = loaded_wallets["JUP"]
-    bonk_wallet = loaded_wallets["BONK"]
+    sol_wallet = loaded_wallets.get("SOL")
+    jup_wallet = loaded_wallets.get("JUP")
+    bonk_wallet = loaded_wallets.get("BONK")
 
 
 def get_wallet_for_symbol(symbol: str) -> Keypair:
@@ -1019,10 +1025,10 @@ def validate_live_configuration():
             "JUPITER_API_KEY is missing."
         )
 
-    if sol_wallet is None or jup_wallet is None or bonk_wallet is None:
+    if sol_wallet is None or jup_wallet is None:
 
         raise RuntimeError(
-            "SOL, JUP, and BONK wallets must all be loaded."
+            "SOL and JUP wallets must be loaded."
         )
 
     if not SOLANA_RPC_URL:
